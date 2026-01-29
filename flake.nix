@@ -1,5 +1,5 @@
 {
-  description = "claude code cache timer statusline";
+  description = "claude code cache expiry statusline";
 
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
