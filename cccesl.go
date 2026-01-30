@@ -14,7 +14,10 @@ type StatusInput struct {
 }
 
 func main() {
-	ttl := flag.Duration("ttl", 5*time.Minute, "cache TTL duration")
+	// claude code transcripts imply the cache TTL is 1 hour.
+	// the typical line.message.usage.cache_creation struct has
+	// zero `ephemeral_5m_input_tokens` and non-zero `ephemeral_1h_input_tokens`.
+	ttl := flag.Duration("ttl", 1*time.Hour, "cache TTL duration")
 	flag.Parse()
 
 	inputBytes, _ := io.ReadAll(os.Stdin)
