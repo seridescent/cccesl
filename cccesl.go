@@ -43,7 +43,7 @@ func CacheStatus(transcriptPath string, ttl time.Duration) string {
 		return "cache expired"
 	}
 
-	return fmt.Sprintf("cache expires %s", expiry.Local().Format("15:04:05"))
+	return fmt.Sprintf("cache expires at %s", expiry.Local().Format("15:04:05"))
 }
 
 // lastAssistantTimestamp reads a Claude Code transcript (JSONL) from the end
