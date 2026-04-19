@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -13,56 +12,105 @@ type StatusInput struct {
 	TranscriptPath string `json:"transcript_path"`
 }
 
-func main() {
-	// claude code transcripts imply the cache TTL is 1 hour.
-	// the typical line.message.usage.cache_creation struct has
-	// zero `ephemeral_5m_input_tokens` and non-zero `ephemeral_1h_input_tokens`.
-	ttl := flag.Duration("ttl", 1*time.Hour, "cache TTL duration")
-	flag.Parse()
+// SessionMessage is a single entry in a Claude Code JSONL session transcript.
+type SessionMessage struct {
+	Type      string    `json:"type"`
+	Timestamp time.Time `json:"timestamp"`
+	Message   Message   `json:"message"`
+}
 
+type Message struct {
+	Usage Usage `json:"usage"`
+}
+
+type Usage struct {
+	CacheCreation CacheCreation `json:"cache_creation"`
+}
+
+type CacheCreation struct {
+	OneHour    int `json:"ephemeral_1h_input_tokens"`
+	FiveMinute int `json:"ephemeral_5m_input_tokens"`
+}
+
+// TTL returns the cache lifetime indicated by whichever ephemeral token count
+// is non-zero. Prefers the 1h bucket if both are set. Returns 0 when neither
+// is set (no cache created by this message).
+func (c CacheCreation) TTL() time.Duration {
+	if c.OneHour > 0 {
+		return time.Hour
+	}
+	if c.FiveMinute > 0 {
+		return 5 * time.Minute
+	}
+	return 0
+}
+
+// parseSessionMessage parses one line of a Claude Code JSONL session transcript.
+func parseSessionMessage(line []byte) (SessionMessage, error) {
+	var msg SessionMessage
+	if err := json.Unmarshal(line, &msg); err != nil {
+		return SessionMessage{}, err
+	}
+	return msg, nil
+}
+
+func isAssistantLine(line []byte) bool {
+	msg, err := parseSessionMessage(line)
+	return err == nil && msg.Type == "assistant" && !msg.Timestamp.IsZero()
+}
+
+func main() {
 	inputBytes, _ := io.ReadAll(os.Stdin)
 	var input StatusInput
 	json.Unmarshal(inputBytes, &input)
 
-	fmt.Println(CacheStatus(input.TranscriptPath, *ttl))
+	fmt.Println(CacheStatus(input.TranscriptPath))
 }
 
 // CacheStatus returns a human-readable string describing the prompt cache state.
-func CacheStatus(transcriptPath string, ttl time.Duration) string {
+func CacheStatus(transcriptPath string) string {
 	if transcriptPath == "" {
 		return "no cache"
 	}
 
-	lastAssistantTime, err := lastAssistantTimestamp(transcriptPath)
+	line, err := lastAssistantLine(transcriptPath)
 	if err != nil {
+		return "transcript error"
+	}
+
+	msg, err := parseSessionMessage(line)
+	if err != nil {
+		return "transcript error"
+	}
+
+	ttl := msg.Message.Usage.CacheCreation.TTL()
+	if ttl == 0 {
 		return "no cache"
 	}
 
-	expiry := lastAssistantTime.Add(ttl)
+	expiry := msg.Timestamp.Add(ttl)
 	if time.Now().After(expiry) {
 		return "cache expired"
 	}
-
 	return fmt.Sprintf("cache expires at %s", expiry.Local().Format("15:04:05"))
 }
 
-// lastAssistantTimestamp reads a Claude Code transcript (JSONL) from the end
-// and returns the timestamp of the most recent assistant message.
-func lastAssistantTimestamp(path string) (time.Time, error) {
+// lastAssistantLine reads a Claude Code transcript (JSONL) from the end
+// and returns the raw bytes of the most recent assistant message line.
+func lastAssistantLine(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return time.Time{}, err
+		return nil, err
 	}
 	defer f.Close()
 
-	// Get file size
 	stat, err := f.Stat()
 	if err != nil {
-		return time.Time{}, err
+		return nil, err
 	}
 	size := stat.Size()
 	if size == 0 {
-		return time.Time{}, fmt.Errorf("empty file")
+		return nil, fmt.Errorf("empty file")
 	}
 
 	// Read from end in chunks, looking for assistant messages
@@ -71,14 +119,12 @@ func lastAssistantTimestamp(path string) (time.Time, error) {
 	var trailing []byte
 
 	for offset := size; offset > 0; {
-		// Calculate read position
 		readSize := min(int64(chunkSize), offset)
 		offset -= readSize
 
-		// Read chunk
 		n, err := f.ReadAt(buf[:readSize], offset)
 		if err != nil && err != io.EOF {
-			return time.Time{}, err
+			return nil, err
 		}
 
 		// Prepend to any trailing partial line from previous chunk
@@ -87,7 +133,6 @@ func lastAssistantTimestamp(path string) (time.Time, error) {
 
 		// Process lines in reverse (split by newlines)
 		for len(chunk) > 0 {
-			// Find the last newline
 			lastNL := -1
 			for i := len(chunk) - 1; i >= 0; i-- {
 				if chunk[i] == '\n' {
@@ -106,36 +151,20 @@ func lastAssistantTimestamp(path string) (time.Time, error) {
 				chunk = chunk[:lastNL]
 				continue
 			} else {
-				// Extract the last complete line
 				line = chunk[lastNL+1:]
 				chunk = chunk[:lastNL]
 			}
 
-			// Try to parse as assistant message
-			var entry struct {
-				Type      string `json:"type"`
-				Timestamp string `json:"timestamp"`
-			}
-			if json.Unmarshal(line, &entry) == nil && entry.Type == "assistant" && entry.Timestamp != "" {
-				if t, err := time.Parse(time.RFC3339Nano, entry.Timestamp); err == nil {
-					return t, nil
-				}
+			if isAssistantLine(line) {
+				return append([]byte(nil), line...), nil
 			}
 		}
 	}
 
 	// Handle any remaining partial line at the start of file
-	if len(trailing) > 0 {
-		var entry struct {
-			Type      string `json:"type"`
-			Timestamp string `json:"timestamp"`
-		}
-		if json.Unmarshal(trailing, &entry) == nil && entry.Type == "assistant" && entry.Timestamp != "" {
-			if t, err := time.Parse(time.RFC3339Nano, entry.Timestamp); err == nil {
-				return t, nil
-			}
-		}
+	if len(trailing) > 0 && isAssistantLine(trailing) {
+		return append([]byte(nil), trailing...), nil
 	}
 
-	return time.Time{}, fmt.Errorf("no assistant messages")
+	return nil, fmt.Errorf("no assistant messages")
 }
