@@ -1,9 +1,10 @@
 # cccesl
 
 this claude code statusline reads the session's transcript to display this session's cache expiry time.
+it assumes that a given session only uses one cache TTL.
 
 this effort was initiated when i thought claude code caches had a 5 minute TTL, but working on this
-statusline makes me reasonably confident that claude code has a 1 hour cache (see [this comment](./cccesl.go#L17)). 
+statusline showed me that it may be 5 minutes or 1 hour. for my use, it seems to always be 1 hour.
 
 admittedly, that makes this tool a bit less relevant; i still care about my 1 hour cache window, 
 but it's a far cry from thinking i have a 5 minute cache window.
